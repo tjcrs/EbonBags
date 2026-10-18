@@ -506,6 +506,21 @@ ToggleBag      = function(id) if Mine(id) then Toggle() else orig.ToggleBag(id) 
 OpenBag        = function(id) if Mine(id) then Show() else orig.OpenBag(id) end end
 CloseBag       = function(id) if Mine(id) then Hide() else orig.CloseBag(id) end end
 
+-- Safety net: if anything (the game's own vendor/mail code, the server UI or
+-- another addon) still opens a default bag window for bags 0-4, close it
+-- straight away and show EbonBags instead. Bank bags and the keyring are left alone.
+for i = 1, NUM_CONTAINER_FRAMES or 13 do
+    local cf = _G["ContainerFrame" .. i]
+    if cf then
+        cf:HookScript("OnShow", function(self)
+            if Mine(self:GetID()) then
+                self:Hide()
+                Show()
+            end
+        end)
+    end
+end
+
 ---------------------------------------------------------------------------
 -- Events
 ---------------------------------------------------------------------------
