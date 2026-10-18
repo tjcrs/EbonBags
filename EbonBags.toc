@@ -1,0 +1,8 @@
+## Interface: 30300
+## Title: EbonBags
+## Notes: Categorized all-in-one bags with Tome of Echo and BoE sections.
+## Author: Richard
+## Version: 1.0
+## SavedVariablesPerCharacter: EbonBagsDB
+
+EbonBags.lua
