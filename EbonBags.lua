@@ -2,6 +2,8 @@
 -- /ebb            toggle bags
 -- /ebb height N   max column height in pixels (default 520)
 -- /ebb reset      reset window position
+-- /ebb block      hover another bag window and type this to keep it closed
+-- /ebb unblock    undo all blocks
 
 ---------------------------------------------------------------------------
 -- Settings you may want to edit
@@ -24,7 +26,7 @@ local BAGSLOT     = 30   -- bag bar button size
 -- Category definitions
 ---------------------------------------------------------------------------
 local ORDER = {
-    "Tome of Echo", "Quest", "BoE", "@SETS",
+    "Recent Loot", "Tome of Echo", "Quest", "BoE", "@SETS",
     "Head", "Neck", "Shoulder", "Back", "Chest", "Shirt", "Tabard", "Wrist",
     "Hands", "Waist", "Legs", "Feet", "Finger", "Trinket",
     "One-Hand", "Two-Hand", "Off Hand", "Ranged", "Relic",
@@ -61,6 +63,7 @@ local TYPES = {
 ---------------------------------------------------------------------------
 EbonBagsDB = EbonBagsDB or {}
 local buttons, headers, setOf = {}, {}, {}
+local recentButtons = {}  -- extra copies shown in "Recent Loot"
 local dirty, needRetry = true, false
 local main, search, money
 
@@ -226,7 +229,7 @@ local function UpdateBagBar()
     for _, bs in ipairs(bagSlots) do UpdateBagSlot(bs) end
 end
 
-local ApplySearch -- defined below
+local ApplySearch, Paint -- defined below
 
 for i = 1, NUM_BAG_SLOTS do
     local bs = CreateFrame("Button", "EbonBagsBagSlot" .. i, main, "ItemButtonTemplate")
@@ -272,13 +275,8 @@ end
 ---------------------------------------------------------------------------
 -- Item buttons
 ---------------------------------------------------------------------------
-local function GetButton(bag, slot)
-    local key = bag * 100 + slot
-    local b = buttons[key]
-    if b then return b end
-
-    local name = "EbonBagsItem" .. bag .. "_" .. slot
-    b = CreateFrame("Button", name, bagFrames[bag], "ContainerFrameItemButtonTemplate")
+local function MakeButton(name, bag, slot)
+    local b = CreateFrame("Button", name, bagFrames[bag], "ContainerFrameItemButtonTemplate")
     b:SetID(slot)
     b:SetWidth(ICON) b:SetHeight(ICON)
     b:SetNormalTexture("")
@@ -300,8 +298,53 @@ local function GetButton(bag, slot)
     b.ilvl = b.border:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
     b.ilvl:SetPoint("TOPLEFT", 2, -2)
 
-    buttons[key] = b
+    b.gain = b.border:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
+    b.gain:SetPoint("TOPRIGHT", -2, -2)
+    b.gain:SetTextColor(0.2, 1, 0.2)
+    b.gain:Hide()
     return b
+end
+
+local function GetButton(bag, slot)
+    local key = bag * 100 + slot
+    if not buttons[key] then
+        buttons[key] = MakeButton("EbonBagsItem" .. bag .. "_" .. slot, bag, slot)
+    end
+    return buttons[key]
+end
+
+-- Recent Loot buttons: a second, fully usable button pointing at the same bag slot
+local function GetRecentButton(i, bag, slot)
+    local b = recentButtons[i]
+    if not b then
+        b = MakeButton("EbonBagsRecent" .. i, bag, slot)
+        recentButtons[i] = b
+    end
+    b:SetParent(bagFrames[bag])
+    b:SetID(slot)
+    b.bag, b.slot = bag, slot
+    return b
+end
+
+-- Bag contents as itemID -> total count (used for Recent Loot)
+local function CountAll()
+    local t = {}
+    for bag = 0, NUM_BAG_SLOTS do
+        for slot = 1, GetContainerNumSlots(bag) do
+            local link = GetContainerItemLink(bag, slot)
+            local id = link and tonumber(link:match("item:(%d+)"))
+            if id then
+                local _, count = GetContainerItemInfo(bag, slot)
+                t[id] = (t[id] or 0) + (count or 1)
+            end
+        end
+    end
+    return t
+end
+
+local function EachButton(fn)
+    for _, b in pairs(buttons) do fn(b) end
+    for _, b in ipairs(recentButtons) do fn(b) end
 end
 
 local function UpdateCooldown(b)
@@ -316,7 +359,7 @@ end
 
 function ApplySearch()
     local q = strlower(strtrim(search:GetText() or ""))
-    for _, b in pairs(buttons) do
+    EachButton(function(b)
         if b:IsShown() then
             local match = q == "" or b.isFree or (b.searchText and b.searchText:find(q, 1, true))
             if hoverBag and b.bag ~= hoverBag then match = false end
@@ -326,7 +369,7 @@ function ApplySearch()
                 b:SetAlpha(0.2)
             end
         end
-    end
+    end)
 end
 search:SetScript("OnTextChanged", ApplySearch)
 
@@ -343,9 +386,27 @@ end
 ---------------------------------------------------------------------------
 -- Layout
 ---------------------------------------------------------------------------
+function Paint(b, quality, ilvl, equipLoc)
+    local c = ITEM_QUALITY_COLORS[quality or 1] or ITEM_QUALITY_COLORS[1]
+    if quality and quality >= 2 then
+        b.border:SetBackdropBorderColor(c.r, c.g, c.b, 1)
+    else
+        b.border:SetBackdropBorderColor(0.3, 0.3, 0.3, 1)
+    end
+    if equipLoc and EQUIP[equipLoc] and not NO_ILVL[equipLoc] and ilvl and ilvl > 1 then
+        b.ilvl:SetText(ilvl)
+        b.ilvl:SetTextColor(c.r, c.g, c.b)
+        b.ilvl:Show()
+    else
+        b.ilvl:Hide()
+    end
+end
+
 local function DoLayout()
     dirty, needRetry = false, false
-    for _, b in pairs(buttons) do b:Hide() b.isFree = nil end
+    EachButton(function(b) b:Hide() b.isFree = nil b.gain:Hide() end)
+    local seen = EbonBagsDB.seen or {}
+    local have, firstSlot = {}, {}
     for _, h in ipairs(headers) do h:Hide() end
 
     local sections, freeCount, freeButton = {}, 0, nil
@@ -364,27 +425,43 @@ local function DoLayout()
                 UpdateLock(b)
                 UpdateCooldown(b)
 
-                local c = ITEM_QUALITY_COLORS[quality or 1] or ITEM_QUALITY_COLORS[1]
-                if quality and quality >= 2 then
-                    b.border:SetBackdropBorderColor(c.r, c.g, c.b, 1)
-                else
-                    b.border:SetBackdropBorderColor(0.3, 0.3, 0.3, 1)
-                end
-                if equipLoc and EQUIP[equipLoc] and not NO_ILVL[equipLoc] and ilvl and ilvl > 1 then
-                    b.ilvl:SetText(ilvl)
-                    b.ilvl:SetTextColor(c.r, c.g, c.b)
-                    b.ilvl:Show()
-                else
-                    b.ilvl:Hide()
-                end
-
+                Paint(b, quality, ilvl, equipLoc)
                 b.searchText = strlower(name) .. "\n" .. strlower(cat)
                 sections[cat] = sections[cat] or {}
-                tinsert(sections[cat], { b = b, name = name, q = quality or 1, ilvl = ilvl or 0 })
+                local entry = { b = b, name = name, q = quality or 1, ilvl = ilvl or 0,
+                                texture = texture, count = count, equipLoc = equipLoc, cat = cat }
+                tinsert(sections[cat], entry)
+
+                local id = tonumber(link:match("item:(%d+)"))
+                if id then
+                    have[id] = (have[id] or 0) + (count or 1)
+                    if not firstSlot[id] then firstSlot[id] = entry end
+                end
             elseif bagType == 0 then
                 freeCount = freeCount + 1
                 if not freeButton then freeButton = GetButton(bag, slot) end
             end
+        end
+    end
+
+    -- Recent Loot: anything you have more of than when the bags were last closed
+    local n = 0
+    for id, total in pairs(have) do
+        local gained = total - (seen[id] or 0)
+        if gained > 0 then
+            n = n + 1
+            local src = firstSlot[id]
+            local rb = GetRecentButton(n, src.b.bag, src.b.slot)
+            SetItemButtonTexture(rb, src.texture)
+            SetItemButtonCount(rb, src.count)
+            UpdateLock(rb)
+            UpdateCooldown(rb)
+            Paint(rb, src.q, src.ilvl, src.equipLoc)
+            rb.gain:SetText("+" .. gained)
+            rb.gain:Show()
+            rb.searchText = strlower(src.name) .. "\nrecent loot\n" .. strlower(src.cat)
+            sections["Recent Loot"] = sections["Recent Loot"] or {}
+            tinsert(sections["Recent Loot"], { b = rb, name = src.name, q = src.q, ilvl = src.ilvl })
         end
     end
 
@@ -483,11 +560,13 @@ local function Toggle() if main:IsShown() then main:Hide() else main:Show() end 
 local function Mine(id) return id and id >= 0 and id <= NUM_BAG_SLOTS end
 
 main:SetScript("OnShow", function()
+    if not EbonBagsDB.seen then EbonBagsDB.seen = CountAll() end
     Layout()
     PlaySound("igBackPackOpen")
     if MainMenuBarBackpackButton then MainMenuBarBackpackButton:SetChecked(1) end
 end)
 main:SetScript("OnHide", function()
+    EbonBagsDB.seen = CountAll()
     search:ClearFocus()
     PlaySound("igBackPackClose")
     if MainMenuBarBackpackButton then MainMenuBarBackpackButton:SetChecked(nil) end
@@ -521,6 +600,57 @@ for i = 1, NUM_CONTAINER_FRAMES or 13 do
     end
 end
 
+
+---------------------------------------------------------------------------
+-- Blocked windows: other bag frames (server UI / other addons) to keep closed.
+-- Hover the unwanted window and type /ebb block.
+---------------------------------------------------------------------------
+local hooked = {}
+local PROTECTED = { UIParent = true, WorldFrame = true, EbonBagsFrame = true }
+
+local function HookBlocked()
+    if not EbonBagsDB.block then return end
+    for name in pairs(EbonBagsDB.block) do
+        local f = _G[name]
+        if f and not hooked[f] and f.HookScript then
+            hooked[f] = true
+            f:HookScript("OnShow", function(self)
+                if EbonBagsDB.block and EbonBagsDB.block[name] then
+                    self:Hide()
+                    Show()
+                end
+            end)
+        end
+        if f and f.IsShown and f:IsShown() then f:Hide() end
+    end
+end
+
+local function TopFrameUnderMouse()
+    local f = GetMouseFocus()
+    if not f or f == WorldFrame then return nil end
+    while f:GetParent() and f:GetParent() ~= UIParent and f:GetParent() ~= WorldFrame do
+        f = f:GetParent()
+    end
+    return f
+end
+
+local function BlockUnderMouse()
+    local f = TopFrameUnderMouse()
+    local name = f and f:GetName()
+    if not f then
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ccffEbonBags:|r Hover the unwanted bag window, then type /ebb block (type it, don't move the mouse).")
+    elseif not name then
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ccffEbonBags:|r That window has no name, so it can't be blocked. Tell Claude: it's an unnamed frame.")
+    elseif PROTECTED[name] then
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ccffEbonBags:|r That's EbonBags itself - hover the OTHER bag window.")
+    else
+        EbonBagsDB.block = EbonBagsDB.block or {}
+        EbonBagsDB.block[name] = true
+        HookBlocked()
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ccffEbonBags:|r Blocked |cffffd100" .. name .. "|r - it will stay closed from now on. (/ebb unblock to undo)")
+    end
+end
+
 ---------------------------------------------------------------------------
 -- Events
 ---------------------------------------------------------------------------
@@ -541,6 +671,7 @@ ev:SetScript("OnEvent", function(_, event)
         if p then main:SetPoint(p[1], UIParent, p[2], p[3], p[4])
         else main:SetPoint("BOTTOMRIGHT", UIParent, "BOTTOMRIGHT", -60, 110) end
         BuildSets()
+        HookBlocked()
         DEFAULT_CHAT_FRAME:AddMessage("|cff33ccffEbonBags|r loaded - press B or type /ebb")
     elseif event == "BAG_UPDATE" or event == "UNIT_INVENTORY_CHANGED" then
         dirty = true
@@ -548,10 +679,10 @@ ev:SetScript("OnEvent", function(_, event)
         BuildSets()
         dirty = true
     elseif event == "ITEM_LOCK_CHANGED" then
-        for _, b in pairs(buttons) do if b:IsShown() and not b.isFree then UpdateLock(b) end end
+        EachButton(function(b) if b:IsShown() and not b.isFree then UpdateLock(b) end end)
         UpdateBagBar()
     elseif event == "BAG_UPDATE_COOLDOWN" then
-        for _, b in pairs(buttons) do if b:IsShown() and not b.isFree then UpdateCooldown(b) end end
+        EachButton(function(b) if b:IsShown() and not b.isFree then UpdateCooldown(b) end end)
     elseif event == "PLAYER_MONEY" then
         UpdateMoney()
     elseif OPEN_ON[event] then
@@ -563,8 +694,13 @@ end)
 
 -- Batch updates: re-layout at most ~10 times a second, only while open.
 local elapsed, retryTimer = 0, 0
+local blockTimer = 0
 ev:SetScript("OnUpdate", function(_, dt)
     if not main:IsShown() then return end
+    if EbonBagsDB.block then
+        blockTimer = blockTimer + dt
+        if blockTimer > 0.2 then blockTimer = 0 HookBlocked() end
+    end
     if needRetry then
         retryTimer = retryTimer + dt
         if retryTimer > 1 then retryTimer = 0 dirty = true end
@@ -587,6 +723,11 @@ SlashCmdList["EBONBAGS"] = function(msg)
         EbonBagsDB.height = h
         if main:IsShown() then Layout() end
         DEFAULT_CHAT_FRAME:AddMessage("|cff33ccffEbonBags:|r column height set to " .. h)
+    elseif msg == "block" then
+        BlockUnderMouse()
+    elseif msg == "unblock" then
+        EbonBagsDB.block = nil
+        DEFAULT_CHAT_FRAME:AddMessage("|cff33ccffEbonBags:|r All blocked windows unblocked. /reload to fully restore them.")
     elseif msg == "reset" then
         EbonBagsDB.pos = nil
         main:ClearAllPoints()
